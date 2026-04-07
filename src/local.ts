@@ -2884,6 +2884,10 @@ return {
 		// then get details for specific components.
 
 		// Helper function to ensure design system cache is loaded (auto-loads if needed)
+		// Circuit breaker state for design system cache loading
+		let lastCacheFailure: { time: number; error: string } | null = null;
+		const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000; // 60s cooldown after failure
+
 		const ensureDesignSystemCache = async (): Promise<{
 			cacheEntry: any;
 			fileKey: string;
@@ -2906,9 +2910,27 @@ return {
 				return { cacheEntry, fileKey, wasLoaded: false };
 			}
 
-			// Need to extract fresh data - do this silently without returning an error
+			// Circuit breaker: if the last load failed recently, don't retry
+			if (lastCacheFailure && Date.now() - lastCacheFailure.time < CIRCUIT_BREAKER_COOLDOWN_MS) {
+				const cooldownRemaining = Math.ceil((CIRCUIT_BREAKER_COOLDOWN_MS - (Date.now() - lastCacheFailure.time)) / 1000);
+				throw new Error(
+					`Design system cache load is on cooldown (${cooldownRemaining}s remaining) after previous failure: ${lastCacheFailure.error}. ` +
+					`The Figma plugin may need to be restarted. Try again in ${cooldownRemaining}s or reopen the Desktop Bridge plugin in Figma.`
+				);
+			}
+
+			// Health ping: verify plugin is responsive before expensive operation
 			logger.info({ fileKey }, "Auto-loading design system cache");
 			const connector = await this.getDesktopConnector();
+
+			try {
+				await connector.executeCodeViaUI("return figma.currentPage.name", 3000);
+			} catch (_healthErr) {
+				lastCacheFailure = { time: Date.now(), error: "Plugin unresponsive (health ping failed)" };
+				throw new Error(
+					"Figma plugin is not responding. Reopen the Desktop Bridge plugin in Figma and try again."
+				);
+			}
 			const manifest = createEmptyManifest(fileKey);
 			manifest.fileUrl = currentUrl || undefined;
 
@@ -2998,7 +3020,12 @@ return {
 					}
 				}
 			} catch (error) {
+				const errMsg = error instanceof Error ? error.message : String(error);
 				logger.warn({ error }, "Could not fetch components during auto-load");
+				// Trip circuit breaker if component fetch failed (likely a freeze/timeout)
+				if (errMsg.includes("timed out") || errMsg.includes("ConnectionRefused") || errMsg.includes("not responding")) {
+					lastCacheFailure = { time: Date.now(), error: errMsg };
+				}
 			}
 
 			// Update summary
