@@ -3336,7 +3336,7 @@ export function registerFigmaAPITools(
 	// Solves race condition where REST API screenshots show stale data after changes
 	server.tool(
 		"figma_capture_screenshot",
-		"Capture a screenshot of a node using the plugin's exportAsync API. IMPORTANT: This tool captures the CURRENT state from the plugin runtime (not cloud state like REST API), making it reliable for validating changes immediately after making them. Use this instead of figma_get_component_image when you need to verify that changes were applied correctly. Requires Desktop Bridge connection (Figma Desktop with plugin running).",
+		"Capture a screenshot of a node using the plugin's exportAsync API. IMPORTANT: This tool captures the CURRENT state from the plugin runtime (not cloud state like REST API), making it reliable for validating changes immediately after making them. Use this instead of figma_get_component_image when you need to verify that changes were applied correctly. Requires Desktop Bridge connection (Figma Desktop with plugin running).\n\n**PERFORMANCE TIP:** For fast iteration validation (checking layout/spacing/alignment), use scale=1 and format=JPG — this is 5-10x faster than the default 2x PNG. Reserve scale=2 PNG for final visual inspection only.",
 		{
 			nodeId: z
 				.string()

@@ -207,10 +207,10 @@ figma.ui.onmessage = async (msg) => {
       console.log('🌉 [Desktop Bridge] Wrapped code for eval');
 
       // Execute with timeout
-      var timeoutMs = msg.timeout || 5000;
+      var timeoutMs = msg.timeout || 30000;
       var timeoutPromise = new Promise(function(_, reject) {
         setTimeout(function() {
-          reject(new Error('Execution timed out after ' + timeoutMs + 'ms. If traversing the document, avoid findAll() on figma.root — use page-scoped searches instead. For complex operations, split into smaller calls or increase the timeout parameter.'));
+          reject(new Error('Execution timed out after ' + timeoutMs + 'ms'));
         }, timeoutMs);
       });
 
@@ -1192,7 +1192,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       // Check if node supports description
@@ -1236,7 +1236,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET') {
@@ -1287,7 +1287,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET') {
@@ -1326,7 +1326,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET') {
@@ -1364,7 +1364,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('resize' in node)) {
@@ -1407,7 +1407,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('x' in node)) {
@@ -1447,7 +1447,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('fills' in node)) {
@@ -1500,7 +1500,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('strokes' in node)) {
@@ -1556,7 +1556,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('opacity' in node)) {
@@ -1595,7 +1595,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('cornerRadius' in node)) {
@@ -1634,7 +1634,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (!('clone' in node)) {
@@ -1673,7 +1673,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       var deletedInfo = { id: node.id, name: node.name };
@@ -1710,7 +1710,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       var oldName = node.name;
@@ -1746,7 +1746,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (node.type !== 'TEXT') {
@@ -1793,7 +1793,7 @@ figma.ui.onmessage = async (msg) => {
 
       var parent = await figma.getNodeByIdAsync(msg.parentId);
       if (!parent) {
-        throw new Error('Parent node not found: ' + msg.parentId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Parent node not found: ' + msg.parentId);
       }
 
       if (!('appendChild' in parent)) {
@@ -1904,7 +1904,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = msg.nodeId ? await figma.getNodeByIdAsync(msg.nodeId) : figma.currentPage;
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       // Verify node supports export
@@ -1921,20 +1921,8 @@ figma.ui.onmessage = async (msg) => {
         constraint: { type: 'SCALE', value: scale }
       };
 
-      // Export with timeout guard — exportAsync can hang on complex frames.
-      // 40s inner timeout ensures this fires before the ui.html (43s) and WS (46s) timeouts.
-      // 40s accommodates complex frames at scale=4 while still preventing indefinite hangs.
-      var exportTimeoutMs = 40000;
-      var exportTimeoutPromise = new Promise(function(_, reject) {
-        setTimeout(function() {
-          reject(new Error('exportAsync timed out after ' + exportTimeoutMs + 'ms — node may be too complex. Try a smaller scale or a specific child node.'));
-        }, exportTimeoutMs);
-      });
-
-      var bytes = await Promise.race([
-        node.exportAsync(exportSettings),
-        exportTimeoutPromise
-      ]);
+      // Export the node
+      var bytes = await node.exportAsync(exportSettings);
 
       // Convert to base64
       var base64 = figma.base64Encode(bytes);
@@ -2041,7 +2029,7 @@ figma.ui.onmessage = async (msg) => {
 
       var node = await figma.getNodeByIdAsync(msg.nodeId);
       if (!node) {
-        throw new Error('Node not found: ' + msg.nodeId + '. NodeIds are session-specific and reset when Figma restarts. Use figma_search_components to get current nodeIds.');
+        throw new Error('Node not found: ' + msg.nodeId);
       }
 
       if (node.type !== 'INSTANCE') {

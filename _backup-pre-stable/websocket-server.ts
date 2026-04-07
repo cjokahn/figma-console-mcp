@@ -34,15 +34,6 @@ interface PendingRequest {
   targetFileKey: string;
 }
 
-interface QueuedCommand {
-  method: string;
-  params: Record<string, any>;
-  timeoutMs: number;
-  fileKey: string;
-  resolve: (value: any) => void;
-  reject: (reason: any) => void;
-}
-
 export interface ConnectedFileInfo {
   fileName: string;
   fileKey: string | null;
@@ -83,7 +74,6 @@ export interface ClientConnection {
   consoleLogs: ConsoleLogEntry[];
   lastActivity: number;
   gracePeriodTimer: ReturnType<typeof setTimeout> | null;
-  isAlive: boolean;
 }
 
 export class FigmaWebSocketServer extends EventEmitter {
@@ -100,12 +90,6 @@ export class FigmaWebSocketServer extends EventEmitter {
   private _isStarted = false;
   private consoleBufferSize = 1000;
   private documentChangeBufferSize = 200;
-  /** Heartbeat ping interval — detects dead connections */
-  private pingInterval: ReturnType<typeof setInterval> | null = null;
-  /** Per-file command queue — serializes commands through the single-threaded plugin sandbox */
-  private commandQueues: Map<string, QueuedCommand[]> = new Map();
-  /** Tracks which files have a command currently in-flight */
-  private activeCommands: Set<string> = new Set();
 
   constructor(options: WebSocketServerOptions) {
     super();
@@ -124,7 +108,6 @@ export class FigmaWebSocketServer extends EventEmitter {
           port: this.options.port,
           host: this.options.host || 'localhost',
           maxPayload: 100 * 1024 * 1024, // 100MB — screenshots and large component data can be big
-          perMessageDeflate: true, // Compress large payloads (screenshots, component trees) ~5-10x
           verifyClient: (info, callback) => {
             // Mitigate Cross-Site WebSocket Hijacking (CSWSH):
             // Reject connections from unexpected browser origins.
@@ -149,21 +132,6 @@ export class FigmaWebSocketServer extends EventEmitter {
             { port: this.options.port, host: this.options.host || 'localhost' },
             'WebSocket bridge server started'
           );
-
-          // Start heartbeat — ping every 15s, terminate unresponsive clients
-          this.pingInterval = setInterval(() => {
-            for (const [fileKey, client] of this.clients) {
-              if (client.ws.readyState !== WebSocket.OPEN) continue;
-              if (!client.isAlive) {
-                logger.warn({ fileKey, fileName: client.fileInfo.fileName }, 'Client failed heartbeat, terminating');
-                client.ws.terminate();
-                continue;
-              }
-              client.isAlive = false;
-              client.ws.ping();
-            }
-          }, 15000);
-
           resolve();
         });
 
@@ -207,13 +175,6 @@ export class FigmaWebSocketServer extends EventEmitter {
               this.handleMessage(message, ws);
             } catch (error) {
               logger.error({ error }, 'Failed to parse WebSocket message');
-            }
-          });
-
-          ws.on('pong', () => {
-            const found = this.findClientByWs(ws);
-            if (found) {
-              found.client.isAlive = true;
             }
           });
 
@@ -400,7 +361,6 @@ export class FigmaWebSocketServer extends EventEmitter {
       consoleLogs: existing?.consoleLogs || [],
       lastActivity: Date.now(),
       gracePeriodTimer: null,
-      isAlive: true,
     });
 
     // Set as active file if no active file or active file is disconnected
@@ -482,10 +442,9 @@ export class FigmaWebSocketServer extends EventEmitter {
 
   /**
    * Send a command to a plugin UI and wait for the response.
-   * Commands are queued per-file so only one runs at a time through the
-   * single-threaded plugin sandbox. Transient timeouts are retried once.
+   * By default targets the active file. Pass targetFileKey to target a specific file.
    */
-  sendCommand(method: string, params: Record<string, any> = {}, timeoutMs = 15000, targetFileKey?: string): Promise<any> {
+  sendCommand(method: string, params: Record<string, any> = {}, timeoutMs = 60000, targetFileKey?: string): Promise<any> {
     return new Promise((resolve, reject) => {
       const fileKey = targetFileKey || this._activeFileKey;
 
@@ -494,49 +453,6 @@ export class FigmaWebSocketServer extends EventEmitter {
         return;
       }
 
-      const client = this.clients.get(fileKey);
-      if (!client || client.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('No WebSocket client connected. Make sure the Desktop Bridge plugin is open in Figma.'));
-        return;
-      }
-
-      // Enqueue and process
-      const command: QueuedCommand = { method, params, timeoutMs, fileKey, resolve, reject };
-      if (!this.commandQueues.has(fileKey)) {
-        this.commandQueues.set(fileKey, []);
-      }
-      this.commandQueues.get(fileKey)!.push(command);
-      this._processQueue(fileKey);
-    });
-  }
-
-  /**
-   * Process the next queued command for a file (if none is in-flight).
-   */
-  private _processQueue(fileKey: string): void {
-    if (this.activeCommands.has(fileKey)) return;
-
-    const queue = this.commandQueues.get(fileKey);
-    if (!queue || queue.length === 0) return;
-
-    const command = queue.shift()!;
-    this.activeCommands.add(fileKey);
-
-    this._executeSend(command.method, command.params, command.timeoutMs, command.fileKey)
-      .then(command.resolve)
-      .catch(command.reject)
-      .finally(() => {
-        this.activeCommands.delete(fileKey);
-        this._processQueue(fileKey);
-      });
-  }
-
-  /**
-   * Send a single command over WebSocket and wait for the response.
-   * This is the low-level send — callers should use sendCommand() for queuing.
-   */
-  private _executeSend(method: string, params: Record<string, any>, timeoutMs: number, fileKey: string): Promise<any> {
-    return new Promise((resolve, reject) => {
       const client = this.clients.get(fileKey);
       if (!client || client.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('No WebSocket client connected. Make sure the Desktop Bridge plugin is open in Figma.'));
@@ -772,10 +688,9 @@ export class FigmaWebSocketServer extends EventEmitter {
   // ============================================================================
 
   /**
-   * Reject pending requests and queued commands for a specific file
+   * Reject pending requests that were sent to a specific file
    */
   private rejectPendingRequestsForFile(fileKey: string, reason: string): void {
-    // Reject in-flight requests
     for (const [id, pending] of this.pendingRequests) {
       if (pending.targetFileKey === fileKey) {
         clearTimeout(pending.timeoutId);
@@ -783,15 +698,6 @@ export class FigmaWebSocketServer extends EventEmitter {
         this.pendingRequests.delete(id);
       }
     }
-    // Drain queued commands
-    const queue = this.commandQueues.get(fileKey);
-    if (queue) {
-      for (const cmd of queue) {
-        cmd.reject(new Error(reason));
-      }
-      this.commandQueues.delete(fileKey);
-    }
-    this.activeCommands.delete(fileKey);
   }
 
   /**
@@ -809,12 +715,6 @@ export class FigmaWebSocketServer extends EventEmitter {
    * Stop the server and clean up all connections
    */
   async stop(): Promise<void> {
-    // Stop heartbeat
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
-
     // Clear all per-client grace period timers
     for (const [, client] of this.clients) {
       if (client.gracePeriodTimer) {
@@ -830,15 +730,6 @@ export class FigmaWebSocketServer extends EventEmitter {
     this._pendingClients.clear();
 
     this.rejectPendingRequests('WebSocket server shutting down');
-
-    // Drain all command queues
-    for (const [fileKey, queue] of this.commandQueues) {
-      for (const cmd of queue) {
-        cmd.reject(new Error('WebSocket server shutting down'));
-      }
-    }
-    this.commandQueues.clear();
-    this.activeCommands.clear();
 
     // Terminate all connected clients so wss.close() resolves promptly
     if (this.wss) {

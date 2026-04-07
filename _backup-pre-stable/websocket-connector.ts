@@ -1,14 +1,9 @@
 /**
- * WebSocket Figma Connector (Stable Fork)
+ * WebSocket Figma Connector
  *
- * Implements IFigmaConnector using WebSocket transport.
+ * Implements IFigmaConnector using WebSocket transport instead of CDP.
  * Each method sends a command to the plugin UI via WebSocket and waits
  * for the response — same window.* functions, different transport.
- *
- * Timeout alignment:
- *   code.js inner timeout < ui.html sendPluginCommand timeout < WS sendCommand timeout
- *   This ensures the innermost layer always fires first, producing a clean error
- *   message rather than a generic "timed out" from the wrong layer.
  *
  * Data flow: MCP Server ←WebSocket→ ui.html ←postMessage→ code.js ←figma.*→ Figma
  */
@@ -18,10 +13,6 @@ import type { FigmaWebSocketServer } from './websocket-server.js';
 import { createChildLogger } from './logger.js';
 
 const logger = createChildLogger({ component: 'websocket-connector' });
-
-// Timeout margin between layers (ms)
-// code.js gets T, ui.html gets T + MARGIN, WS gets T + 2*MARGIN
-const TIMEOUT_MARGIN = 3000;
 
 export class WebSocketConnector implements IFigmaConnector {
   private wsServer: FigmaWebSocketServer;
@@ -48,8 +39,7 @@ export class WebSocketConnector implements IFigmaConnector {
   // ============================================================================
 
   async executeInPluginContext<T = any>(code: string): Promise<T> {
-    // code.js: 30000ms, ui.html: 30000 + MARGIN, WS: 30000 + 2*MARGIN
-    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: 30000 }, 30000 + 2 * TIMEOUT_MARGIN);
+    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: 30000 }, 35000);
   }
 
   async getVariablesFromPluginUI(fileKey?: string): Promise<any> {
@@ -79,12 +69,11 @@ export class WebSocketConnector implements IFigmaConnector {
         }
       })()
     `;
-    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: 30000 }, 30000 + 2 * TIMEOUT_MARGIN, fileKey);
+    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: 30000 }, 32000, fileKey);
   }
 
   async executeCodeViaUI(code: string, timeoutMs = 5000): Promise<any> {
-    // code.js gets timeoutMs, ui.html gets timeoutMs + MARGIN, WS gets timeoutMs + 2*MARGIN
-    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: timeoutMs }, timeoutMs + 2 * TIMEOUT_MARGIN);
+    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: timeoutMs }, timeoutMs + 2000);
   }
 
   // ============================================================================
@@ -174,7 +163,7 @@ export class WebSocketConnector implements IFigmaConnector {
   }
 
   async setNodeDescription(nodeId: string, description: string, descriptionMarkdown?: string): Promise<any> {
-    return this.wsServer.sendCommand('SET_NODE_DESCRIPTION', { nodeId, description, descriptionMarkdown });
+    return this.wsServer.sendCommand('SET_NODE_DESCRIPTION', { nodeId, description, descriptionMarkdown }, 60000);
   }
 
   async addComponentProperty(
@@ -274,8 +263,7 @@ export class WebSocketConnector implements IFigmaConnector {
     const params: any = { nodeId };
     if (options?.format) params.format = options.format;
     if (options?.scale) params.scale = options.scale;
-    // code.js exportAsync guard: 40s, ui.html: 40s + MARGIN, WS: 40s + 2*MARGIN
-    return this.wsServer.sendCommand('CAPTURE_SCREENSHOT', params, 40000 + 2 * TIMEOUT_MARGIN);
+    return this.wsServer.sendCommand('CAPTURE_SCREENSHOT', params, 30000);
   }
 
   async setInstanceProperties(nodeId: string, properties: any): Promise<any> {

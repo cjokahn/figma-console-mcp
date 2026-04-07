@@ -132,7 +132,7 @@
     // COMMAND INFRASTRUCTURE - Generic plugin command sender
     // ============================================================================
     window.sendPluginCommand = (type, params, timeoutMs) => {
-      timeoutMs = timeoutMs || 15000;
+      timeoutMs = timeoutMs || 60000;
       return new Promise((resolve, reject) => {
         const requestId = type.toLowerCase() + '_' + (++requestIdCounter) + '_' + Date.now();
 
@@ -162,10 +162,7 @@
     // ============================================================================
 
     window.executeCode = (code, timeout) => {
-      // Timeout alignment: code.js gets `timeout`, ui.html gets `timeout + 3000`
-      // WS outer layer adds another 3000 on top of this
-      var innerTimeout = timeout || 5000;
-      return window.sendPluginCommand('EXECUTE_CODE', { code: code, timeout: innerTimeout }, innerTimeout + 3000)
+      return window.sendPluginCommand('EXECUTE_CODE', { code: code, timeout: timeout || 5000 }, (timeout || 5000) + 2000)
         .catch(function(err) { return { success: false, error: err.message || String(err) }; });
     };
 
@@ -405,8 +402,7 @@
         if (options.format) params.format = options.format;  // PNG, JPG, SVG
         if (options.scale) params.scale = options.scale;      // 1, 2, 4, etc.
       }
-      // Timeout alignment: code.js exportAsync guard = 40s, ui.html = 40s + 3s = 43s
-      return window.sendPluginCommand('CAPTURE_SCREENSHOT', params, 43000)
+      return window.sendPluginCommand('CAPTURE_SCREENSHOT', params, 30000)
         .catch(function(err) { return { success: false, error: err.message || String(err) }; });
     };
 

@@ -11,6 +11,9 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": [
+      "https://api.pexels.com",
+      "https://images.pexels.com",
+      "https://videos.pexels.com",
       "http://localhost",
       "ws://localhost",
       "ws://localhost:9223",

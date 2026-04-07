@@ -187,14 +187,10 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 
 	/**
 	 * Get or create Desktop Connector for write operations.
-	 * WebSocket-only — no CDP fallback (eliminates double-retry amplification).
+	 * Tries WebSocket first (instant, no network timeout), falls back to CDP.
 	 */
 	private async getDesktopConnector(): Promise<IFigmaConnector> {
-		// Return cached connector if WS is still connected
-		if (this.desktopConnector && this.wsServer?.isClientConnected()) {
-			return this.desktopConnector;
-		}
-
+		// Try WebSocket first — instant check, no network timeout delay
 		if (this.wsServer?.isClientConnected()) {
 			try {
 				const wsConnector = new WebSocketConnector(this.wsServer);
@@ -204,16 +200,40 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 				return this.desktopConnector;
 			} catch (wsError) {
 				const errorMsg = wsError instanceof Error ? wsError.message : String(wsError);
-				logger.debug({ error: errorMsg }, "WebSocket connector init failed");
+				logger.debug({ error: errorMsg }, "WebSocket connector init failed, trying CDP fallback");
 			}
+		}
+
+		// CDP fallback (requires --remote-debugging-port=9222)
+		try {
+			await this.ensureInitialized();
+
+			if (this.browserManager) {
+				// Always get a fresh page reference to handle page navigation/refresh
+				const page = await this.browserManager.getPage();
+
+				// Always recreate the connector with the current page to avoid stale references
+				// This prevents "detached Frame" errors when Figma page is refreshed
+				const cdpConnector = new FigmaDesktopConnector(page);
+				await cdpConnector.initialize();
+				this.desktopConnector = cdpConnector;
+				logger.debug("Desktop connector initialized via CDP with fresh page reference");
+				return this.desktopConnector;
+			}
+		} catch (cdpError) {
+			const errorMsg = cdpError instanceof Error ? cdpError.message : String(cdpError);
+			logger.debug({ error: errorMsg }, "CDP connection also unavailable");
 		}
 
 		const wsPort = this.wsActualPort || this.wsPreferredPort || DEFAULT_WS_PORT;
 		throw new Error(
 			"Cannot connect to Figma Desktop.\n\n" +
-			"Open the Desktop Bridge plugin in Figma.\n" +
-			`The plugin will connect automatically to ws://localhost:${wsPort}.\n` +
-			"No special launch flags needed."
+			"Option 1 (WebSocket): Open the Desktop Bridge plugin in Figma.\n" +
+			`  The plugin will connect automatically to ws://localhost:${wsPort}.\n` +
+			"  No special launch flags needed.\n\n" +
+			"Option 2 (CDP): Launch Figma with --remote-debugging-port=9222\n" +
+			"  macOS: open -a \"Figma\" --args --remote-debugging-port=9222\n" +
+			"  Windows: start figma://--remote-debugging-port=9222"
 		);
 	}
 
@@ -1853,63 +1873,111 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 				timeout: z
 					.number()
 					.optional()
-					.default(5000)
+					.default(30000)
 					.describe(
-						"Execution timeout in milliseconds (default: 5000, max: 30000)",
+						"Execution timeout in milliseconds (default: 30000, max: 60000)",
 					),
 			},
 			async ({ code, timeout }) => {
-				try {
-					const connector = await this.getDesktopConnector();
-					const result = await connector.executeCodeViaUI(
-						code,
-						Math.min(timeout, 30000),
-					);
+				const maxRetries = 2;
+				let lastError: Error | null = null;
 
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify(
-									{
-										success: result.success,
-										result: result.result,
-										error: result.error,
-										resultAnalysis: result.resultAnalysis,
-										fileContext: result.fileContext,
-										timestamp: Date.now(),
-									},
-								),
-							},
-						],
-					};
-				} catch (error) {
-					const lastError =
-						error instanceof Error ? error : new Error(String(error));
+				for (let attempt = 0; attempt <= maxRetries; attempt++) {
+					try {
+						const connector = await this.getDesktopConnector();
+						const result = await connector.executeCodeViaUI(
+							code,
+							Math.min(timeout, 60000),
+						);
 
-					// Clear cached connector so next call gets a fresh one
-					this.desktopConnector = null;
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify(
+										{
+											success: result.success,
+											result: result.result,
+											error: result.error,
+											// Include resultAnalysis for silent failure detection
+											resultAnalysis: result.resultAnalysis,
+											// Include file context so users know which file was queried
+											fileContext: result.fileContext,
+											timestamp: Date.now(),
+											...(attempt > 0
+												? { reconnected: true, attempts: attempt + 1 }
+												: {}),
+										},
+									),
+								},
+							],
+						};
+					} catch (error) {
+						lastError =
+							error instanceof Error ? error : new Error(String(error));
+						const errorMessage = lastError.message;
 
-					logger.error(
-						{ error: lastError },
-						"Failed to execute code",
-					);
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify(
-									{
-										error: lastError?.message || "Unknown error",
-										message: "Failed to execute code in Figma plugin context",
-										hint: "Make sure the Desktop Bridge plugin is running in Figma",
-									},
-								),
-							},
-						],
-						isError: true,
-					};
+						// Check if it's a detached frame error - auto-reconnect
+						if (
+							errorMessage.includes("detached Frame") ||
+							errorMessage.includes("Execution context was destroyed") ||
+							errorMessage.includes("Target closed")
+						) {
+							logger.warn(
+								{ attempt, error: errorMessage },
+								"Detached frame detected, forcing reconnection",
+							);
+
+							// Clear cached connector and force browser reconnection
+							this.desktopConnector = null;
+
+							if (this.browserManager && attempt < maxRetries) {
+								try {
+									await this.browserManager.forceReconnect();
+
+									// Reinitialize console monitor with new page
+									if (this.consoleMonitor) {
+										this.consoleMonitor.stopMonitoring();
+										const page = await this.browserManager.getPage();
+										await this.consoleMonitor.startMonitoring(page);
+									}
+
+									logger.info("Reconnection successful, retrying execution");
+									continue; // Retry the execution
+								} catch (reconnectError) {
+									logger.error(
+										{ error: reconnectError },
+										"Failed to reconnect",
+									);
+								}
+							}
+						}
+
+						// Non-recoverable error or max retries exceeded
+						break;
+					}
 				}
+
+				// All retries failed
+				logger.error(
+					{ error: lastError },
+					"Failed to execute code after retries",
+				);
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{
+									error: lastError?.message || "Unknown error",
+									message: "Failed to execute code in Figma plugin context",
+									hint: "Make sure the Desktop Bridge plugin is running in Figma",
+								},
+							),
+						},
+					],
+					isError: true,
+				};
 			},
 		);
 
@@ -2516,7 +2584,7 @@ return {
 					const timeout = Math.max(5000, variables.length * 200);
 					const result = await connector.executeCodeViaUI(
 						script,
-						Math.min(timeout, 30000),
+						Math.min(timeout, 60000),
 					);
 
 					if (result.error) {
@@ -2645,7 +2713,7 @@ return {
 					const timeout = Math.max(5000, updates.length * 150);
 					const result = await connector.executeCodeViaUI(
 						script,
-						Math.min(timeout, 30000),
+						Math.min(timeout, 60000),
 					);
 
 					if (result.error) {
@@ -2815,7 +2883,7 @@ return {
 					);
 					const result = await connector.executeCodeViaUI(
 						script,
-						Math.min(timeout, 30000),
+						Math.min(timeout, 60000),
 					);
 
 					if (result.error) {
@@ -5538,10 +5606,10 @@ return {
 
 				// Invalidate variable cache when document changes are reported.
 				// Figma's documentchange API doesn't expose a specific variable change type —
-				// Variable operations manifest as PROPERTY_CHANGE events with hasStyleChanges: true.
-				// Regular node moves/fills only trigger hasNodeChanges — no need to blow the variable cache.
+				// variable operations manifest as node PROPERTY_CHANGE events, so we invalidate
+				// on any style or node change to be safe.
 				this.wsServer.on("documentChange", (data: any) => {
-					if (data.hasStyleChanges) {
+					if (data.hasStyleChanges || data.hasNodeChanges) {
 						if (data.fileKey) {
 							// Per-file cache invalidation — only clear the affected file's cache
 							this.variablesCache.delete(data.fileKey);
