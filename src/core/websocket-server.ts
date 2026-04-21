@@ -124,7 +124,7 @@ export class FigmaWebSocketServer extends EventEmitter {
           port: this.options.port,
           host: this.options.host || 'localhost',
           maxPayload: 100 * 1024 * 1024, // 100MB — screenshots and large component data can be big
-          perMessageDeflate: true, // Compress large payloads (screenshots, component trees) ~5-10x
+          perMessageDeflate: false, // loopback-only; compression adds CPU overhead with no bandwidth benefit
           verifyClient: (info, callback) => {
             // Mitigate Cross-Site WebSocket Hijacking (CSWSH):
             // Reject connections from unexpected browser origins.
@@ -481,9 +481,26 @@ export class FigmaWebSocketServer extends EventEmitter {
   }
 
   /**
+   * Commands that only read Figma state and never mutate the document.
+   * These bypass the per-file command queue and run immediately in parallel
+   * with any in-flight writes — the plugin sandbox handles them safely since
+   * they don't touch document state.
+   */
+  private static readonly READ_ONLY_COMMANDS = new Set([
+    'GET_VARIABLES_DATA',
+    'GET_LOCAL_COMPONENTS',
+    'REFRESH_VARIABLES',
+    'GET_COMPONENT',
+    'CAPTURE_SCREENSHOT',
+    'GET_FILE_INFO',
+  ]);
+
+  /**
    * Send a command to a plugin UI and wait for the response.
-   * Commands are queued per-file so only one runs at a time through the
-   * single-threaded plugin sandbox. Transient timeouts are retried once.
+   * Write commands are queued per-file so only one runs at a time through the
+   * single-threaded plugin sandbox. Read-only commands bypass the queue and
+   * execute immediately — they don't modify document state so no serialization
+   * is needed.
    */
   sendCommand(method: string, params: Record<string, any> = {}, timeoutMs = 15000, targetFileKey?: string): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -500,7 +517,13 @@ export class FigmaWebSocketServer extends EventEmitter {
         return;
       }
 
-      // Enqueue and process
+      // Read-only commands skip the queue — execute immediately
+      if (FigmaWebSocketServer.READ_ONLY_COMMANDS.has(method)) {
+        this._executeSend(method, params, timeoutMs, fileKey).then(resolve).catch(reject);
+        return;
+      }
+
+      // Write commands: enqueue and process serially to prevent race conditions
       const command: QueuedCommand = { method, params, timeoutMs, fileKey, resolve, reject };
       if (!this.commandQueues.has(fileKey)) {
         this.commandQueues.set(fileKey, []);

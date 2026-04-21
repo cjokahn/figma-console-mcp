@@ -113,6 +113,7 @@
     // ============================================================================
     window.__figmaVariablesData = null;
     window.__figmaVariablesReady = false;
+    window.__figmaVariablesStale = false;
     window.__figmaComponentData = null;
     window.__figmaComponentRequests = new Map();
     window.__figmaPendingRequests = new Map();
@@ -161,11 +162,13 @@
     // VARIABLE OPERATIONS
     // ============================================================================
 
-    window.executeCode = (code, timeout) => {
-      // Timeout alignment: code.js gets `timeout`, ui.html gets `timeout + 3000`
-      // WS outer layer adds another 3000 on top of this
+    window.executeCode = (code, timeout, autoCapture) => {
+      // Timeout alignment: code.js gets `timeout`, ui.html gets `timeout + 1000`
+      // WS outer layer adds another 1000 on top of this (TIMEOUT_MARGIN = 1000)
       var innerTimeout = timeout || 5000;
-      return window.sendPluginCommand('EXECUTE_CODE', { code: code, timeout: innerTimeout }, innerTimeout + 3000)
+      var params = { code: code, timeout: innerTimeout };
+      if (autoCapture) params.autoCapture = true;
+      return window.sendPluginCommand('EXECUTE_CODE', params, innerTimeout + 1000)
         .catch(function(err) { return { success: false, error: err.message || String(err) }; });
     };
 
@@ -405,8 +408,8 @@
         if (options.format) params.format = options.format;  // PNG, JPG, SVG
         if (options.scale) params.scale = options.scale;      // 1, 2, 4, etc.
       }
-      // Timeout alignment: code.js exportAsync guard = 40s, ui.html = 40s + 3s = 43s
-      return window.sendPluginCommand('CAPTURE_SCREENSHOT', params, 43000)
+      // Timeout alignment: code.js exportAsync guard = 40s, ui.html = 40s + 1s = 41s
+      return window.sendPluginCommand('CAPTURE_SCREENSHOT', params, 41000)
         .catch(function(err) { return { success: false, error: err.message || String(err) }; });
     };
 
@@ -443,7 +446,7 @@
 
       // Method-to-function mapping
       var methodMap = {
-        'EXECUTE_CODE': function(params) { return window.executeCode(params.code, params.timeout); },
+        'EXECUTE_CODE': function(params) { return window.executeCode(params.code, params.timeout, params.autoCapture); },
         'UPDATE_VARIABLE': function(params) { return window.updateVariable(params.variableId, params.modeId, params.value); },
         'CREATE_VARIABLE': function(params) { return window.createVariable(params.name, params.collectionId, params.resolvedType, params); },
         'DELETE_VARIABLE': function(params) { return window.deleteVariable(params.variableId); },
@@ -475,7 +478,14 @@
         'CAPTURE_SCREENSHOT': function(params) { return window.captureScreenshot(params.nodeId, params); },
         'SET_INSTANCE_PROPERTIES': function(params) { return window.setInstanceProperties(params.nodeId, params.properties); },
         'GET_VARIABLES_DATA': function() {
-          // Return the cached variables data directly
+          if (window.__figmaVariablesStale) {
+            // Trigger a background refresh; caller should retry in ~1s for fresh data
+            window.__figmaVariablesStale = false;
+            setTimeout(function() { window.refreshVariables && window.refreshVariables(); }, 200);
+            if (window.__figmaVariablesReady && window.__figmaVariablesData) {
+              return Promise.resolve(window.__figmaVariablesData); // serve stale while refreshing
+            }
+          }
           if (window.__figmaVariablesReady && window.__figmaVariablesData) {
             return Promise.resolve(window.__figmaVariablesData);
           }
@@ -835,6 +845,7 @@
         case 'VARIABLES_DATA':
           window.__figmaVariablesData = msg.data;
           window.__figmaVariablesReady = true;
+          window.__figmaVariablesStale = false;
           updateStatus('ready', true, false);
           console.log('[MCP Bridge] Active - ' + (msg.data.variables?.length || 0) + ' vars');
           // Forward to WebSocket client if connected
@@ -859,9 +870,25 @@
           break;
 
         // Variable operations
-        case 'EXECUTE_CODE_RESULT':
-          handleResult('EXECUTE_CODE', 'result');
+        case 'EXECUTE_CODE_RESULT': {
+          // Custom handler: preserve resultAnalysis, fileContext, and screenshot
+          // (generic handleResult only passes the dataKey field and drops everything else)
+          var execReq = window.__figmaPendingRequests.get(msg.requestId);
+          if (execReq) {
+            if (execReq.timeoutId) clearTimeout(execReq.timeoutId);
+            if (msg.success) {
+              var execResult = { success: true, result: msg.result };
+              if (msg.resultAnalysis !== undefined) execResult.resultAnalysis = msg.resultAnalysis;
+              if (msg.fileContext !== undefined) execResult.fileContext = msg.fileContext;
+              if (msg.screenshot !== undefined) execResult.screenshot = msg.screenshot;
+              execReq.resolve(execResult);
+            } else {
+              execReq.resolve({ success: false, error: msg.error || 'Unknown error' });
+            }
+            window.__figmaPendingRequests.delete(msg.requestId);
+          }
           break;
+        }
         case 'UPDATE_VARIABLE_RESULT':
           handleResult('UPDATE_VARIABLE', 'variable');
           break;
@@ -968,6 +995,7 @@
 
         // Document change events (for cache invalidation via WebSocket)
         case 'DOCUMENT_CHANGE':
+          window.__figmaVariablesStale = true; // invalidate variables snapshot on any document change
           if (window.__wsForwardDocumentChange) window.__wsForwardDocumentChange(msg.data);
           break;
 

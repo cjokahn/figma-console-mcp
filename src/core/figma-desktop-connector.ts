@@ -607,7 +607,7 @@ export class FigmaDesktopConnector implements IFigmaConnector {
    * This is the power tool that can run any Figma Plugin API code
    * Includes retry logic for detached frame errors
    */
-  async executeCodeViaUI(code: string, timeout: number = 5000): Promise<any> {
+  async executeCodeViaUI(code: string, timeout: number = 5000, options?: { autoCapture?: boolean }): Promise<any> {
     await this.logToFigmaConsole((codeStr: string, timeoutMs: number) => {
       console.log(`[DESKTOP_CONNECTOR] executeCodeViaUI() called, code length: ${codeStr.length}, timeout: ${timeoutMs}ms`);
     }, code, timeout);
@@ -629,7 +629,7 @@ export class FigmaDesktopConnector implements IFigmaConnector {
 
         // Call the executeCode function in the UI iframe
         const result = await frame.evaluate(
-          `window.executeCode(${JSON.stringify(code)}, ${timeout})`
+          `window.executeCode(${JSON.stringify(code)}, ${timeout}, ${options?.autoCapture ? 'true' : 'false'})`
         );
 
         logger.info({ success: result.success, error: result.error }, 'Code execution completed');

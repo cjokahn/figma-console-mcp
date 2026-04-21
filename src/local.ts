@@ -97,7 +97,7 @@ This MCP server enables AI-assisted design creation in Figma. Follow these manda
 ### VISUAL VALIDATION WORKFLOW (Required)
 After creating or modifying ANY visual design elements:
 1. **CREATE**: Execute design code via figma_execute
-2. **SCREENSHOT**: Capture result with figma_take_screenshot
+2. **SCREENSHOT**: Capture result with figma_capture_screenshot
 3. **ANALYZE**: Check alignment, spacing, proportions, visual balance
 4. **ITERATE**: Fix issues and repeat (max 3 iterations)
 5. **VERIFY**: Final screenshot to confirm
@@ -109,7 +109,7 @@ After creating or modifying ANY visual design elements:
 
 ### PAGE CREATION
 - Before creating a page, check if it already exists to avoid duplicates
-- Use: await figma.loadAllPagesAsync(); const existing = figma.root.children.find(p => p.name === 'PageName');
+- Use: const existing = figma.root.children.find(p => p.name === 'PageName'); // synchronous, do NOT call loadAllPagesAsync inside figma_execute — it freezes Figma
 
 ### COMMON DESIGN ISSUES TO CHECK
 - Elements using "hug contents" instead of "fill container" (causes lopsided layouts)
@@ -614,8 +614,8 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 					.min(0.01)
 					.max(4)
 					.optional()
-					.default(2)
-					.describe("Image scale factor (0.01-4, default: 2 for high quality)"),
+					.default(1)
+					.describe("Image scale factor (0.01-4, default: 1 — sufficient for layout validation; use 2 for final pixel-perfect inspection)"),
 				format: z
 					.enum(["png", "jpg", "svg", "pdf"])
 					.optional()
@@ -1857,32 +1857,53 @@ If Design Systems Assistant MCP is not available, install it from: https://githu
 					.describe(
 						"Execution timeout in milliseconds (default: 5000, max: 30000)",
 					),
+				autoCapture: z
+					.boolean()
+					.optional()
+					.default(false)
+					.describe(
+						"If true and the result contains an .id field (a Figma nodeId), automatically captures a JPG screenshot of that node at scale=1. " +
+						"Saves one tool call vs calling figma_capture_screenshot separately — ideal for the CREATE → VALIDATE loop.",
+					),
 			},
-			async ({ code, timeout }) => {
+			async ({ code, timeout, autoCapture }) => {
 				try {
 					const connector = await this.getDesktopConnector();
 					const result = await connector.executeCodeViaUI(
 						code,
 						Math.min(timeout, 30000),
+						{ autoCapture },
 					);
 
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify(
-									{
-										success: result.success,
-										result: result.result,
-										error: result.error,
-										resultAnalysis: result.resultAnalysis,
-										fileContext: result.fileContext,
-										timestamp: Date.now(),
-									},
-								),
-							},
-						],
+					const responsePayload: Record<string, unknown> = {
+						success: result.success,
+						result: result.result,
+						error: result.error,
+						screenshotCaptured: !!result.screenshot,
 					};
+					// Only emit resultAnalysis when there is an actionable warning
+					if (result.resultAnalysis?.warning) {
+						responsePayload.resultAnalysis = result.resultAnalysis;
+					}
+					const textContent = {
+						type: "text" as const,
+						text: JSON.stringify(responsePayload),
+					};
+
+					if (result.screenshot?.base64) {
+						return {
+							content: [
+								textContent,
+								{
+									type: "image" as const,
+									data: result.screenshot.base64,
+									mimeType: "image/jpeg",
+								},
+							],
+						};
+					}
+
+					return { content: [textContent] };
 				} catch (error) {
 					const lastError =
 						error instanceof Error ? error : new Error(String(error));
@@ -2902,7 +2923,12 @@ return {
 			const cache = DesignSystemManifestCache.getInstance();
 			const currentUrl = this.getCurrentFileUrl();
 			const fileKeyMatch = currentUrl?.match(/\/(file|design)\/([a-zA-Z0-9]+)/);
-			const fileKey = fileKeyMatch ? fileKeyMatch[2] : "unknown";
+			if (!currentUrl || !fileKeyMatch) {
+				throw new Error(
+					"Cannot determine current Figma file. Open a Figma file in the Desktop app and ensure the Desktop Bridge plugin is running.",
+				);
+			}
+			const fileKey = fileKeyMatch[2];
 
 			// Check cache first
 			let cacheEntry = cache.get(fileKey);
@@ -2934,12 +2960,17 @@ return {
 			const manifest = createEmptyManifest(fileKey);
 			manifest.fileUrl = currentUrl || undefined;
 
-			// Get variables (tokens)
-			try {
-				const variablesResult = await connector.getVariables(fileKey);
+			// Fetch variables and components in parallel — no data dependency between them
+			const [variablesSettled, componentsSettled] = await Promise.allSettled([
+				connector.getVariables(fileKey),
+				connector.getLocalComponents(),
+			]);
+
+			// Process variables result
+			if (variablesSettled.status === "fulfilled") {
+				const variablesResult = variablesSettled.value;
 				if (variablesResult.success && variablesResult.data) {
-					for (const collection of variablesResult.data.variableCollections ||
-						[]) {
+					for (const collection of variablesResult.data.variableCollections || []) {
 						manifest.collections.push({
 							id: collection.id,
 							name: collection.name,
@@ -2975,16 +3006,16 @@ return {
 						}
 					}
 				}
-			} catch (error) {
-				logger.warn({ error }, "Could not fetch variables during auto-load");
+			} else {
+				logger.warn({ error: variablesSettled.reason }, "Could not fetch variables during auto-load");
 			}
 
-			// Get components
+			// Process components result
 			let rawComponents:
 				| { components: any[]; componentSets: any[] }
 				| undefined;
-			try {
-				const componentsResult = await connector.getLocalComponents();
+			if (componentsSettled.status === "fulfilled") {
+				const componentsResult = componentsSettled.value;
 				if (componentsResult.success && componentsResult.data) {
 					rawComponents = {
 						components: componentsResult.data.components || [],
@@ -3019,11 +3050,18 @@ return {
 						};
 					}
 				}
-			} catch (error) {
-				const errMsg = error instanceof Error ? error.message : String(error);
-				logger.warn({ error }, "Could not fetch components during auto-load");
+			} else {
+				const errMsg =
+					componentsSettled.reason instanceof Error
+						? componentsSettled.reason.message
+						: String(componentsSettled.reason);
+				logger.warn({ error: componentsSettled.reason }, "Could not fetch components during auto-load");
 				// Trip circuit breaker if component fetch failed (likely a freeze/timeout)
-				if (errMsg.includes("timed out") || errMsg.includes("ConnectionRefused") || errMsg.includes("not responding")) {
+				if (
+					errMsg.includes("timed out") ||
+					errMsg.includes("ConnectionRefused") ||
+					errMsg.includes("not responding")
+				) {
 					lastCacheFailure = { time: Date.now(), error: errMsg };
 				}
 			}
@@ -3079,7 +3117,12 @@ return {
 					const fileKeyMatch = currentUrl?.match(
 						/\/(file|design)\/([a-zA-Z0-9]+)/,
 					);
-					const fileKey = fileKeyMatch ? fileKeyMatch[2] : "unknown";
+					if (!currentUrl || !fileKeyMatch) {
+						throw new Error(
+							"Cannot determine current Figma file. Open a Figma file in the Desktop app and ensure the Desktop Bridge plugin is running.",
+						);
+					}
+					const fileKey = fileKeyMatch[2];
 
 					// Check cache first
 					let cacheEntry = cache.get(fileKey);
@@ -3642,7 +3685,7 @@ Search results return both identifiers. Pass both so the tool can automatically 
 NodeIds are session-specific and may be stale from previous conversations. ALWAYS search for components at the start of each design session to get current, valid identifiers.
 
 **VISUAL VALIDATION WORKFLOW:**
-After instantiating components, use figma_take_screenshot to verify the result looks correct. Check placement, sizing, and visual balance.`,
+After instantiating components, use figma_capture_screenshot to verify the result looks correct. Check placement, sizing, and visual balance.`,
 			{
 				componentKey: z
 					.string()

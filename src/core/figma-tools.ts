@@ -3347,15 +3347,15 @@ export function registerFigmaAPITools(
 			format: z
 				.enum(["PNG", "JPG", "SVG"])
 				.optional()
-				.default("PNG")
-				.describe("Image format (default: PNG)"),
+				.default("JPG")
+				.describe("Image format (default: JPG — smaller and faster than PNG; use PNG only for final exports needing lossless quality)"),
 			scale: z
 				.number()
 				.min(0.5)
 				.max(4)
 				.optional()
-				.default(2)
-				.describe("Scale factor (default: 2 for 2x resolution)"),
+				.default(1)
+				.describe("Scale factor (default: 1 — sufficient for layout/spacing validation; use 2 only for final pixel-perfect inspection)"),
 		},
 		async ({ nodeId, format, scale }) => {
 			try {

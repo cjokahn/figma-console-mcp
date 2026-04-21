@@ -21,7 +21,8 @@ const logger = createChildLogger({ component: 'websocket-connector' });
 
 // Timeout margin between layers (ms)
 // code.js gets T, ui.html gets T + MARGIN, WS gets T + 2*MARGIN
-const TIMEOUT_MARGIN = 3000;
+// 1000ms is enough — innermost layer always fires first, giving a clean error
+const TIMEOUT_MARGIN = 1000;
 
 export class WebSocketConnector implements IFigmaConnector {
   private wsServer: FigmaWebSocketServer;
@@ -82,9 +83,11 @@ export class WebSocketConnector implements IFigmaConnector {
     return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: 30000 }, 30000 + 2 * TIMEOUT_MARGIN, fileKey);
   }
 
-  async executeCodeViaUI(code: string, timeoutMs = 5000): Promise<any> {
+  async executeCodeViaUI(code: string, timeoutMs = 5000, options?: { autoCapture?: boolean }): Promise<any> {
     // code.js gets timeoutMs, ui.html gets timeoutMs + MARGIN, WS gets timeoutMs + 2*MARGIN
-    return this.wsServer.sendCommand('EXECUTE_CODE', { code, timeout: timeoutMs }, timeoutMs + 2 * TIMEOUT_MARGIN);
+    const params: Record<string, any> = { code, timeout: timeoutMs };
+    if (options?.autoCapture) params.autoCapture = true;
+    return this.wsServer.sendCommand('EXECUTE_CODE', params, timeoutMs + 2 * TIMEOUT_MARGIN);
   }
 
   // ============================================================================

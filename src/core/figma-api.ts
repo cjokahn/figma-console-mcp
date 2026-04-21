@@ -107,8 +107,17 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
  * Figma API Client
  * Makes authenticated requests to Figma REST API
  */
+/** Cache entry for getImages — URLs are valid 30 days, we keep 30 min per session */
+interface ImageCacheEntry {
+  url: string | null;
+  expiresAt: number;
+}
+
 export class FigmaAPI {
   private accessToken: string;
+  /** nodeId → cached S3 URL (30-min TTL) — avoids repeated REST + S3 round-trips */
+  private imageCache = new Map<string, ImageCacheEntry>();
+  private static readonly IMAGE_CACHE_TTL = 30 * 60 * 1000;
 
   constructor(config: FigmaAPIConfig) {
     this.accessToken = config.accessToken;
@@ -125,16 +134,7 @@ export class FigmaAPI {
     // Personal Access Tokens use X-Figma-Token header
     const isOAuthToken = this.accessToken.startsWith('figu_');
 
-    // Debug logging to verify token is being used
-    const tokenPreview = this.accessToken ? `${this.accessToken.substring(0, 10)}...` : 'NO TOKEN';
-    logger.info({
-      url,
-      tokenPreview,
-      hasToken: !!this.accessToken,
-      tokenLength: this.accessToken?.length,
-      isOAuthToken,
-      authMethod: isOAuthToken ? 'Bearer' : 'X-Figma-Token'
-    }, 'Making Figma API request with token');
+    logger.debug({ url, isOAuthToken }, 'Figma API request');
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -355,9 +355,42 @@ export class FigmaAPI {
 
 		const endpoint = `/images/${fileKey}?${params.toString()}`;
 
-		logger.info({ fileKey, ids, options }, 'Rendering images');
+		// Return cached URLs for node IDs we've already fetched this session
+		const now = Date.now();
+		const idList = ids.split(',');
+		const result: Record<string, string | null> = {};
+		const uncachedIds: string[] = [];
 
-		return this.request(endpoint);
+		for (const id of idList) {
+			const cached = this.imageCache.get(`${fileKey}:${id}`);
+			if (cached && cached.expiresAt > now) {
+				result[id] = cached.url;
+			} else {
+				uncachedIds.push(id);
+			}
+		}
+
+		if (uncachedIds.length === 0) {
+			logger.debug({ fileKey, ids }, 'getImages: all from cache');
+			return { images: result };
+		}
+
+		// Fetch only the uncached IDs
+		const fetchParams = new URLSearchParams(params);
+		fetchParams.set('ids', uncachedIds.join(','));
+		const fetchEndpoint = `/images/${fileKey}?${fetchParams.toString()}`;
+		logger.debug({ fileKey, uncached: uncachedIds.length, cached: idList.length - uncachedIds.length }, 'Rendering images');
+
+		const response = await this.request(fetchEndpoint);
+		const expiresAt = now + FigmaAPI.IMAGE_CACHE_TTL;
+
+		for (const id of uncachedIds) {
+			const url = response.images?.[id] ?? null;
+			this.imageCache.set(`${fileKey}:${id}`, { url, expiresAt });
+			result[id] = url;
+		}
+
+		return { images: result };
 	}
 
   /**

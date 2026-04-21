@@ -194,17 +194,10 @@ figma.ui.onmessage = async (msg) => {
   // ============================================================================
   if (msg.type === 'EXECUTE_CODE') {
     try {
-      console.log('🌉 [Desktop Bridge] Executing code, length:', msg.code.length);
-
-      // Use eval with async IIFE wrapper instead of AsyncFunction constructor
-      // AsyncFunction is restricted in Figma's plugin sandbox, but eval works
-      // See: https://developers.figma.com/docs/plugins/resource-links
-
       // Wrap user code in an async IIFE that returns a Promise
-      // This allows async/await in user code while using eval
+      // AsyncFunction constructor is restricted in Figma's plugin sandbox, but eval works
+      // See: https://developers.figma.com/docs/plugins/resource-links
       var wrappedCode = "(async function() {\n" + msg.code + "\n})()";
-
-      console.log('🌉 [Desktop Bridge] Wrapped code for eval');
 
       // Execute with timeout
       var timeoutMs = msg.timeout || 5000;
@@ -235,8 +228,6 @@ figma.ui.onmessage = async (msg) => {
         codePromise,
         timeoutPromise
       ]);
-
-      console.log('🌉 [Desktop Bridge] Code executed successfully, result type:', typeof result);
 
       // Analyze result for potential silent failures
       var resultAnalysis = {
@@ -273,12 +264,36 @@ figma.ui.onmessage = async (msg) => {
         console.warn('🌉 [Desktop Bridge] ⚠️ Result warning:', resultAnalysis.warning);
       }
 
+      // autoCapture: if requested and result has a single nodeId, capture screenshot in the same round-trip
+      var screenshotData = null;
+      if (msg.autoCapture && result && typeof result === 'object' && typeof result.id === 'string') {
+        try {
+          var captureNode = await figma.getNodeByIdAsync(result.id);
+          if (captureNode && 'exportAsync' in captureNode) {
+            var captureBytes = await captureNode.exportAsync({
+              format: 'JPG',
+              constraint: { type: 'SCALE', value: 1 }
+            });
+            screenshotData = {
+              base64: figma.base64Encode(captureBytes),
+              format: 'JPG',
+              scale: 1,
+              byteLength: captureBytes.length,
+              nodeId: result.id
+            };
+          }
+        } catch (captureErr) {
+          console.warn('🌉 [Desktop Bridge] autoCapture failed:', captureErr && captureErr.message ? captureErr.message : String(captureErr));
+        }
+      }
+
       figma.ui.postMessage({
         type: 'EXECUTE_CODE_RESULT',
         requestId: msg.requestId,
         success: true,
         result: result,
         resultAnalysis: resultAnalysis,
+        screenshot: screenshotData,
         // Include file context so users know which file this executed against
         fileContext: {
           fileName: figma.root.name,
@@ -814,7 +829,6 @@ figma.ui.onmessage = async (msg) => {
   // ============================================================================
   else if (msg.type === 'GET_LOCAL_COMPONENTS') {
     try {
-      console.log('🌉 [Desktop Bridge] Fetching all local components for manifest...');
 
       // Find all component sets and standalone components in the file
       var components = [];
@@ -853,7 +867,9 @@ figma.ui.onmessage = async (msg) => {
 
       // Helper to extract component set data with all variants
       function extractComponentSetData(node) {
-        var variantAxes = {};
+        // Use object-as-set for O(1) deduplication instead of array indexOf (O(n))
+        var variantAxesSeen = {}; // { axisName: { value: true, ... } }
+        var variantAxes = {};    // { axisName: [value, ...] } — built from seen
         var variants = [];
 
         // Parse variant properties from children names
@@ -870,11 +886,13 @@ figma.ui.onmessage = async (msg) => {
                   var value = kv[1].trim();
                   variantProps[key] = value;
 
-                  // Track all values for each axis
-                  if (!variantAxes[key]) {
+                  // O(1) deduplication using object-as-set
+                  if (!variantAxesSeen[key]) {
+                    variantAxesSeen[key] = {};
                     variantAxes[key] = [];
                   }
-                  if (variantAxes[key].indexOf(value) === -1) {
+                  if (!variantAxesSeen[key][value]) {
+                    variantAxesSeen[key][value] = true;
                     variantAxes[key].push(value);
                   }
                 }
@@ -951,21 +969,16 @@ figma.ui.onmessage = async (msg) => {
       var pages = figma.root.children;
       var totalPages = pages.length;
 
-      console.log('🌉 [Desktop Bridge] Processing ' + totalPages + ' pages (per-page loading, max depth ' + MAX_DEPTH + ')...');
-
       for (var pageIndex = 0; pageIndex < totalPages; pageIndex++) {
         var page = pages[pageIndex];
 
-        // Load this single page into memory
+        // Load each page individually to avoid loading the entire document into memory
         try {
           await figma.loadPageAsync(page);
         } catch (loadErr) {
           console.warn('🌉 [Desktop Bridge] Could not load page "' + page.name + '": ' + loadErr);
           continue;
         }
-
-        var childCount = page.children ? page.children.length : 0;
-        console.log('🌉 [Desktop Bridge] Scanning page ' + (pageIndex + 1) + '/' + totalPages + ' "' + page.name + '" (' + childCount + ' top-level children)');
 
         // Scan this page for components
         findComponents(page, 0);
@@ -1908,9 +1921,9 @@ figma.ui.onmessage = async (msg) => {
         throw new Error('Node type ' + node.type + ' does not support export');
       }
 
-      // Configure export settings
-      var format = msg.format || 'PNG';
-      var scale = msg.scale || 2;
+      // Configure export settings — JPG at scale=1 is 5-10x faster than PNG at scale=2
+      var format = msg.format || 'JPG';
+      var scale = msg.scale || 1;
 
       var exportSettings = {
         format: format,
@@ -2131,64 +2144,81 @@ figma.ui.onmessage = async (msg) => {
 // DOCUMENT CHANGE LISTENER - Forward change events for cache invalidation
 // Fires when variables, styles, or nodes change (by any means — user edits, API, etc.)
 // Requires figma.loadAllPagesAsync() in dynamic-page mode before registering.
+//
+// Both documentchange and selectionchange are debounced to batch rapid-fire events
+// into a single postMessage. figma_execute creating 10 nodes would otherwise fire
+// 10 separate DOCUMENT_CHANGE events through the full chain to the MCP server.
 // ============================================================================
 figma.loadAllPagesAsync().then(function() {
-  figma.on('documentchange', function(event) {
-    var hasStyleChanges = false;
-    var hasNodeChanges = false;
-    var changedNodeIds = [];
+  // Debounce state for document changes — accumulates across rapid-fire events
+  var docChangeTimer = null;
+  var pendingDocChange = { hasStyleChanges: false, hasNodeChanges: false, changedNodeIds: [], changeCount: 0 };
 
+  figma.on('documentchange', function(event) {
     for (var i = 0; i < event.documentChanges.length; i++) {
       var change = event.documentChanges[i];
       if (change.type === 'STYLE_CREATE' || change.type === 'STYLE_DELETE' || change.type === 'STYLE_PROPERTY_CHANGE') {
-        hasStyleChanges = true;
+        pendingDocChange.hasStyleChanges = true;
       } else if (change.type === 'CREATE' || change.type === 'DELETE' || change.type === 'PROPERTY_CHANGE') {
-        hasNodeChanges = true;
-        if (change.id && changedNodeIds.length < 50) {
-          changedNodeIds.push(change.id);
+        pendingDocChange.hasNodeChanges = true;
+        if (change.id && pendingDocChange.changedNodeIds.length < 50) {
+          pendingDocChange.changedNodeIds.push(change.id);
         }
       }
+      pendingDocChange.changeCount += event.documentChanges.length;
     }
 
-    if (hasStyleChanges || hasNodeChanges) {
+    if (!pendingDocChange.hasStyleChanges && !pendingDocChange.hasNodeChanges) return;
+
+    if (docChangeTimer) clearTimeout(docChangeTimer);
+    docChangeTimer = setTimeout(function() {
+      docChangeTimer = null;
       figma.ui.postMessage({
         type: 'DOCUMENT_CHANGE',
         data: {
-          hasStyleChanges: hasStyleChanges,
-          hasNodeChanges: hasNodeChanges,
-          changedNodeIds: changedNodeIds,
-          changeCount: event.documentChanges.length,
+          hasStyleChanges: pendingDocChange.hasStyleChanges,
+          hasNodeChanges: pendingDocChange.hasNodeChanges,
+          changedNodeIds: pendingDocChange.changedNodeIds,
+          changeCount: pendingDocChange.changeCount,
           timestamp: Date.now()
         }
       });
-    }
-  });
-  // Selection change listener — tracks what the user has selected in Figma
-  figma.on('selectionchange', function() {
-    var selection = figma.currentPage.selection;
-    var selectedNodes = [];
-    for (var i = 0; i < Math.min(selection.length, 50); i++) {
-      var node = selection[i];
-      selectedNodes.push({
-        id: node.id,
-        name: node.name,
-        type: node.type,
-        width: node.width,
-        height: node.height
-      });
-    }
-    figma.ui.postMessage({
-      type: 'SELECTION_CHANGE',
-      data: {
-        nodes: selectedNodes,
-        count: selection.length,
-        page: figma.currentPage.name,
-        timestamp: Date.now()
-      }
-    });
+      // Reset accumulator
+      pendingDocChange = { hasStyleChanges: false, hasNodeChanges: false, changedNodeIds: [], changeCount: 0 };
+    }, 200);
   });
 
-  // Page change listener — tracks which page the user is viewing
+  // Selection change listener — debounced to avoid flooding on rapid multi-select actions
+  var selectionTimer = null;
+  figma.on('selectionchange', function() {
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = setTimeout(function() {
+      selectionTimer = null;
+      var selection = figma.currentPage.selection;
+      var selectedNodes = [];
+      for (var i = 0; i < Math.min(selection.length, 50); i++) {
+        var node = selection[i];
+        selectedNodes.push({
+          id: node.id,
+          name: node.name,
+          type: node.type,
+          width: node.width,
+          height: node.height
+        });
+      }
+      figma.ui.postMessage({
+        type: 'SELECTION_CHANGE',
+        data: {
+          nodes: selectedNodes,
+          count: selection.length,
+          page: figma.currentPage.name,
+          timestamp: Date.now()
+        }
+      });
+    }, 50);
+  });
+
+  // Page change listener — no debounce needed (rare, discrete event)
   figma.on('currentpagechange', function() {
     figma.ui.postMessage({
       type: 'PAGE_CHANGE',
@@ -2199,8 +2229,6 @@ figma.loadAllPagesAsync().then(function() {
       }
     });
   });
-
-  console.log('🌉 [Desktop Bridge] Document change, selection, and page listeners registered');
 }).catch(function(err) {
   console.warn('🌉 [Desktop Bridge] Could not register event listeners:', err);
 });
